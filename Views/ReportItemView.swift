@@ -71,11 +71,14 @@ final class ReportViewModel {
     var photoData: Data? = nil
     var suggestedCategory: ItemCategory? = nil
     var suggestedColorHint: String = ""
+    var detectedText: [String] = []
+    var publishDetectedText: Bool = false
     var analysisInProgress: Bool = false
 
     // Step 2 — Where
     var locationName: String = ""
     var pickedCoordinate: CLLocationCoordinate2D? = nil
+    var campusPlaceID: String? = nil
     var cameraPosition: MapCameraPosition = .region(
         MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: 37.8719, longitude: -122.2585),
@@ -88,10 +91,13 @@ final class ReportViewModel {
 
     // Step 4 — Private details
     var privateDetails: String = ""
+    var verificationQuestion: String = "What identifying detail can only the owner describe?"
+    var verificationAnswer: String = ""
 
     // State
     var isSubmitting: Bool = false
     var showSuccess: Bool = false
+    var errorMessage: String?
 
     var canProceedStep1: Bool {
         !name.trimmed.isEmpty && !itemDescription.trimmed.isEmpty
@@ -114,7 +120,10 @@ struct ReportItemView: View {
     @State private var vm = ReportViewModel()
     @State private var showingCamera = false
     @State private var showingPhotoOptions = false
+    @State private var locationSearch = LocationSearchService()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Environment(LocationService.self) private var locationService
 
     private let imageAnalyzer = ImageAnalysisService()
 
@@ -165,6 +174,12 @@ struct ReportItemView: View {
                     } catch { }
                 }
             }
+            .onChange(of: vm.locationName) { _, name in
+                if name != locationSearch.query { locationSearch.query = name }
+            }
+            .alert("Couldn’t save report", isPresented: Binding(get: { vm.errorMessage != nil }, set: { if !$0 { vm.errorMessage = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(vm.errorMessage ?? "") }
             .fullScreenCover(isPresented: $vm.showSuccess) {
                 ReportSuccessView(mode: mode) {
                     dismiss()
@@ -280,10 +295,25 @@ struct ReportItemView: View {
 
     private func submitReport() {
         vm.isSubmitting = true
-        Task {
-            try? await Task.sleep(for: .seconds(1.2))
+        do {
+            let privatePayload = vm.privateDetails.trimmed.isEmpty ? nil : PrivateVerificationPayload(
+                identifyingDetails: vm.privateDetails.trimmed,
+                question: vm.verificationQuestion.trimmed,
+                acceptedAnswers: vm.verificationAnswer.trimmed.isEmpty ? [vm.privateDetails.trimmed] : [vm.verificationAnswer.trimmed]
+            )
+            let draft = ReportDraft(reportType: mode.reportType, name: vm.name, category: vm.category,
+                                    description: vm.itemDescription, publicLocationName: vm.locationName,
+                                    privateCoordinate: vm.pickedCoordinate,
+                                    publicCoordinate: LocationPrivacy.approximate(vm.pickedCoordinate), campusPlaceID: vm.campusPlaceID,
+                                    occurredAt: vm.date, photoData: vm.photoData, thumbnailData: vm.photoData,
+                                    colorHint: vm.suggestedColorHint, detectedText: vm.publishDetectedText ? vm.detectedText.joined(separator: " ") : "", privateVerification: privatePayload)
+            _ = try ReportRepository(context: modelContext).create(draft)
+            try MatchRepository(context: modelContext).refreshMatches()
             vm.isSubmitting = false
             vm.showSuccess = true
+        } catch {
+            vm.isSubmitting = false
+            vm.errorMessage = error.localizedDescription
         }
     }
 
@@ -299,6 +329,7 @@ struct ReportItemView: View {
             if let color = result.dominantColors.first {
                 vm.suggestedColorHint = color
             }
+            vm.detectedText = result.detectedText
             vm.analysisInProgress = false
         }
     }
@@ -326,6 +357,9 @@ extension ReportItemView {
                 }
                 if let suggested = vm.suggestedCategory, !vm.analysisInProgress {
                     analysisSuggestionBanner(category: suggested)
+                }
+                if !vm.detectedText.isEmpty, !vm.analysisInProgress {
+                    detectedTextSuggestion
                 }
 
                 // Name
@@ -413,6 +447,14 @@ extension ReportItemView {
                 }
             }
             .buttonStyle(.plain)
+
+            Button {
+                showingCamera = true
+            } label: {
+                Label("Take Photo", systemImage: "camera")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryButtonStyle())
         }
     }
 
@@ -481,6 +523,25 @@ extension ReportItemView {
         .background(Color.accentColor.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.sm))
     }
+
+    var detectedTextSuggestion: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("We found text in this photo", systemImage: "text.viewfinder")
+                .font(AppTheme.Font.subheadline)
+            Text(vm.detectedText.joined(separator: " · "))
+                .font(AppTheme.Font.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+            Toggle("Include detected text in the public description", isOn: $vm.publishDetectedText)
+                .font(AppTheme.Font.caption)
+            Text("Review carefully: IDs, phone numbers, email addresses, and serial numbers should stay private.")
+                .font(AppTheme.Font.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.sm))
+    }
 }
 
 // MARK: - Step 2: Where
@@ -494,7 +555,7 @@ extension ReportItemView {
             )
             .padding(.horizontal, AppTheme.Spacing.lg)
 
-            // Map
+            MapReader { proxy in
             Map(position: $vm.cameraPosition, interactionModes: .all) {
                 if let coord = vm.pickedCoordinate {
                     Annotation(vm.locationName.isEmpty ? "Selected location" : vm.locationName, coordinate: coord) {
@@ -528,10 +589,27 @@ extension ReportItemView {
             }
             .padding(.horizontal, AppTheme.Spacing.lg)
             .onTapGesture(coordinateSpace: .local) { location in
-                // Tap on map to place pin — simplified; full implementation uses MapReader
+                if let coordinate = proxy.convert(location, from: .local) {
+                    selectLocation(coordinate: coordinate, name: vm.locationName.isEmpty ? "Selected map location" : vm.locationName)
+                }
+            }
             }
 
             VStack(alignment: .leading, spacing: 10) {
+                Text("CAMPUS PLACES")
+                    .font(AppTheme.Font.overline)
+                    .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(CampusPlaces.suggested) { place in
+                            Button(place.name) { selectCampusPlace(place) }
+                                .font(AppTheme.Font.caption)
+                                .padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(vm.campusPlaceID == place.id ? mode.accentColor.opacity(0.18) : Color(.secondarySystemGroupedBackground))
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
                 Text("LOCATION NAME")
                     .font(AppTheme.Font.overline)
                     .foregroundStyle(.secondary)
@@ -543,6 +621,14 @@ extension ReportItemView {
                         .textInputAutocapitalization(.words)
                 }
                 .formFieldStyle()
+
+                if !locationSearch.results.isEmpty {
+                    ForEach(locationSearch.results.prefix(4), id: \.self) { result in
+                        Button { Task { await selectSearchResult(result) } } label: {
+                            VStack(alignment: .leading, spacing: 2) { Text(result.title).font(AppTheme.Font.subheadline); Text(result.subtitle).font(AppTheme.Font.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.buttonStyle(.plain).padding(.vertical, 6)
+                    }
+                }
             }
             .padding(.horizontal, AppTheme.Spacing.lg)
 
@@ -551,15 +637,29 @@ extension ReportItemView {
     }
 
     private func useCurrentLocation() {
-        // For MVP: set a nearby point on campus
-        vm.pickedCoordinate = CLLocationCoordinate2D(latitude: 37.8719, longitude: -122.2585)
-        vm.cameraPosition = .region(MKCoordinateRegion(
-            center: vm.pickedCoordinate!,
-            span: MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)
-        ))
-        if vm.locationName.isEmpty {
-            vm.locationName = "Current Location"
+        Task {
+            guard let location = await locationService.currentLocationOnce() else { return }
+            let name = await locationService.reverseGeocode(coordinate: location.coordinate) ?? "Current location"
+            selectLocation(coordinate: location.coordinate, name: name)
         }
+    }
+
+    private func selectSearchResult(_ result: MKLocalSearchCompletion) async {
+        guard let mapItem = try? await locationSearch.resolve(result), let coordinate = mapItem.placemark.location?.coordinate else { return }
+        selectLocation(coordinate: coordinate, name: mapItem.name ?? result.title)
+        locationSearch.results = []
+    }
+
+    private func selectLocation(coordinate: CLLocationCoordinate2D, name: String) {
+        vm.pickedCoordinate = coordinate
+        vm.locationName = name
+        locationSearch.query = name
+        vm.cameraPosition = .region(MKCoordinateRegion(center: coordinate, span: MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)))
+    }
+
+    private func selectCampusPlace(_ place: CampusPlace) {
+        vm.campusPlaceID = place.id
+        selectLocation(coordinate: place.coordinate, name: place.name)
     }
 }
 

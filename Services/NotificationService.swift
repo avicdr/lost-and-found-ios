@@ -51,6 +51,11 @@ final class NotificationService {
         )
     }
 
+    func scheduleActivity(type: ActivityEventType, title: String, message: String, delay: TimeInterval = 1) {
+        guard UserDefaults.standard.object(forKey: "sahaay.notifications-enabled") as? Bool != false else { return }
+        schedule(id: "activity-\(UUID().uuidString)", title: title, body: message, delay: delay)
+    }
+
     // MARK: - Private
 
     private func schedule(id: String, title: String, body: String, delay: TimeInterval) {

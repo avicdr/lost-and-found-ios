@@ -4,7 +4,7 @@ import SwiftUI
 /// Used in the Home feed, Explore list, and Profile screens.
 
 struct ItemCard: View {
-    let item: MockItemReport
+    let item: ItemReport
     var showDistance: Bool = false
 
     var body: some View {
@@ -20,10 +20,10 @@ struct ItemCard: View {
                     .lineLimit(1)
 
                 HStack(spacing: 6) {
-                    StatusBadge(reportType: item.reportType, compact: true)
+                    StatusBadge(reportType: item.reportTypeEnum, compact: true)
                     Text("·")
                         .foregroundStyle(.quaternary)
-                    Text(item.category.rawValue)
+                Text(item.categoryEnum.rawValue)
                         .font(AppTheme.Font.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -38,7 +38,7 @@ struct ItemCard: View {
                         .lineLimit(1)
                 }
 
-                Text(item.date.relativeDescription)
+                Text(item.occurredAt.relativeDescription)
                     .font(AppTheme.Font.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -53,7 +53,7 @@ struct ItemCard: View {
         .cardStyle()
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.reportType.displayName): \(item.name). \(item.category.rawValue). \(item.approximateLocation). \(item.date.relativeDescription)")
+        .accessibilityLabel("\(item.reportTypeEnum.displayName): \(item.name). \(item.categoryEnum.rawValue). \(item.approximateLocation). \(item.occurredAt.relativeDescription)")
     }
 
     @ViewBuilder
@@ -70,9 +70,9 @@ struct ItemCard: View {
                     .frame(width: 60, height: 60)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             } else {
-                Image(systemName: item.category.icon)
+                Image(systemName: item.categoryEnum.icon)
                     .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(AppTheme.color(for: item.reportType).opacity(0.7))
+                    .foregroundStyle(AppTheme.color(for: item.reportTypeEnum).opacity(0.7))
             }
         }
     }
@@ -91,7 +91,7 @@ struct MatchCard: View {
                 RoundedRectangle(cornerRadius: 14)
                     .fill(Color(.tertiarySystemGroupedBackground))
                     .frame(width: 60, height: 60)
-                Image(systemName: match.lostReport.category.icon)
+                Image(systemName: match.lostReport.categoryEnum.icon)
                     .font(.system(size: 22, weight: .medium))
                     .foregroundStyle(AppTheme.Color.highConfidence.opacity(0.8))
             }

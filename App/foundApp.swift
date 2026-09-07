@@ -7,6 +7,9 @@ struct foundApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(for: [Item.self, ItemReport.self])
+        .modelContainer(for: [
+            Item.self, ItemReport.self, MatchRecord.self, ClaimRequest.self,
+            ReturnArrangement.self, CoordinationMessage.self, ActivityEvent.self, ModerationReport.self
+        ])
     }
 }

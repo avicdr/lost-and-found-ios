@@ -13,6 +13,7 @@ struct ImageAnalysisResult {
     var suggestedCategory: ItemCategory?
     var dominantColors: [String]
     var objectLabels: [String]         // broad human-readable descriptions
+    var detectedText: [String]         // editable, never published automatically
     var confidence: Double             // overall analysis confidence
     var isAvailable: Bool              // false if Vision failed or no data
 
@@ -20,6 +21,7 @@ struct ImageAnalysisResult {
         suggestedCategory: nil,
         dominantColors: [],
         objectLabels: [],
+        detectedText: [],
         confidence: 0,
         isAvailable: false
     )
@@ -35,18 +37,33 @@ final class ImageAnalysisService: ImageAnalysisServiceProtocol {
 
         async let classificationResult = classifyImage(cgImage)
         async let colorResult = analyzeDominantColors(image)
+        async let textResult = recognizeText(cgImage)
 
         let (labels, confidence) = await classificationResult
         let colors = await colorResult
+        let detectedText = await textResult
         let category = inferCategory(from: labels)
 
         return ImageAnalysisResult(
             suggestedCategory: category,
             dominantColors: colors,
             objectLabels: labels,
+            detectedText: detectedText,
             confidence: confidence,
             isAvailable: true
         )
+    }
+
+    private func recognizeText(_ cgImage: CGImage) async -> [String] {
+        await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, _ in
+                let values = (request.results as? [VNRecognizedTextObservation])?.compactMap { $0.topCandidates(1).first?.string }.prefix(8) ?? []
+                continuation.resume(returning: Array(values))
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+        }
     }
 
     // MARK: - Classification

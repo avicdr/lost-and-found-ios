@@ -64,5 +64,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: ItemReport.self, inMemory: true)
+        .modelContainer(for: [ItemReport.self, MatchRecord.self, ClaimRequest.self], inMemory: true)
 }

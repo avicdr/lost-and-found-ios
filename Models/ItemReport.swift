@@ -2,173 +2,252 @@ import Foundation
 import SwiftData
 import CoreLocation
 
-// MARK: - Enums
+// MARK: - Public report metadata
 
-enum ReportType: String, Codable, CaseIterable {
-    case lost = "lost"
-    case found = "found"
+enum ReportType: String, Codable, CaseIterable, Sendable {
+    case lost, found
 
-    var displayName: String {
-        switch self {
-        case .lost: return "Lost"
-        case .found: return "Found"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .lost: return "magnifyingglass"
-        case .found: return "hand.raised.fill"
-        }
-    }
+    var displayName: String { self == .lost ? "Lost" : "Found" }
+    var icon: String { self == .lost ? "magnifyingglass" : "hand.raised.fill" }
 }
 
-enum ItemCategory: String, Codable, CaseIterable, Identifiable {
-    case electronics = "Electronics"
-    case bags = "Bags"
-    case clothing = "Clothing"
-    case keys = "Keys"
-    case idCards = "ID / Cards"
-    case books = "Books"
-    case accessories = "Accessories"
-    case other = "Other"
+enum ItemCategory: String, Codable, CaseIterable, Identifiable, Sendable {
+    case electronics = "Electronics", bags = "Bags", clothing = "Clothing", keys = "Keys"
+    case idCards = "ID / Cards", books = "Books", accessories = "Accessories", other = "Other"
 
     var id: String { rawValue }
-
     var icon: String {
         switch self {
-        case .electronics: return "bolt.fill"
-        case .bags: return "bag.fill"
-        case .clothing: return "tshirt.fill"
-        case .keys: return "key.fill"
-        case .idCards: return "creditcard.fill"
-        case .books: return "book.fill"
-        case .accessories: return "watchface.applewatch.case"
-        case .other: return "square.grid.2x2.fill"
+        case .electronics: "bolt.fill"
+        case .bags: "bag.fill"
+        case .clothing: "tshirt.fill"
+        case .keys: "key.fill"
+        case .idCards: "creditcard.fill"
+        case .books: "book.fill"
+        case .accessories: "watchface.applewatch.case"
+        case .other: "square.grid.2x2.fill"
         }
     }
 }
 
-enum ItemStatus: String, Codable {
-    case active = "active"
-    case matched = "matched"
-    case returned = "returned"
-    case closed = "closed"
-
+enum ReportState: String, Codable, CaseIterable, Sendable {
+    case draft, active, underReview, hidden, resolved, rejected
     var displayName: String {
         switch self {
-        case .active: return "Active"
-        case .matched: return "Matched"
-        case .returned: return "Returned"
-        case .closed: return "Closed"
+        case .draft: "Draft"
+        case .active: "Active"
+        case .underReview: "Under Review"
+        case .hidden: "Hidden"
+        case .resolved: "Resolved"
+        case .rejected: "Rejected"
         }
     }
 }
 
-// MARK: - ItemReport (SwiftData Model)
+/// Retained for compatibility with the existing badge component.
+enum ItemStatus: String, Codable, Sendable {
+    case active, matched, returned, closed
+    var displayName: String { rawValue.capitalized }
+}
 
 @Model
 final class ItemReport {
-    var id: UUID
-    var reportType: String          // ReportType.rawValue
+    @Attribute(.unique) var id: UUID
+    var ownerID: String
+    var reportType: String
     var name: String
-    var category: String            // ItemCategory.rawValue
+    var category: String
     var itemDescription: String
+    var publicLocationName: String
+    var privateLatitude: Double?
+    var privateLongitude: Double?
+    var publicLatitude: Double?
+    var publicLongitude: Double?
+    var campusPlaceID: String?
+    var occurredAt: Date
+    var createdAt: Date
+    var updatedAt: Date
+    var resolvedAt: Date?
+    var photoData: Data?
+    var thumbnailData: Data?
+    var colorHint: String
+    var detectedText: String
+    var state: String
+    var isDemo: Bool
+
+    var reportTypeEnum: ReportType { ReportType(rawValue: reportType) ?? .lost }
+    var categoryEnum: ItemCategory { ItemCategory(rawValue: category) ?? .other }
+    var stateEnum: ReportState { ReportState(rawValue: state) ?? .active }
+    var statusEnum: ItemStatus {
+        switch stateEnum {
+        case .active: .active
+        case .underReview: .matched
+        case .resolved: .returned
+        case .draft, .hidden, .rejected: .closed
+        }
+    }
+    var coordinate: CLLocationCoordinate2D? {
+        guard let privateLatitude, let privateLongitude else { return nil }
+        return CLLocationCoordinate2D(latitude: privateLatitude, longitude: privateLongitude)
+    }
+    var publicCoordinate: CLLocationCoordinate2D? {
+        guard let publicLatitude, let publicLongitude else { return nil }
+        return CLLocationCoordinate2D(latitude: publicLatitude, longitude: publicLongitude)
+    }
+    var approximateLocation: String { publicLocationName.isEmpty ? "Location withheld" : publicLocationName }
+    var isActive: Bool { stateEnum == .active || stateEnum == .underReview }
+
+    init(
+        id: UUID = UUID(), ownerID: String, reportType: ReportType, name: String,
+        category: ItemCategory, itemDescription: String, publicLocationName: String,
+        privateCoordinate: CLLocationCoordinate2D? = nil,
+        publicCoordinate: CLLocationCoordinate2D? = nil,
+        campusPlaceID: String? = nil, occurredAt: Date = .now, createdAt: Date = .now,
+        photoData: Data? = nil, thumbnailData: Data? = nil, colorHint: String = "",
+        detectedText: String = "", state: ReportState = .active, isDemo: Bool = false
+    ) {
+        self.id = id; self.ownerID = ownerID; self.reportType = reportType.rawValue; self.name = name; self.category = category.rawValue
+        self.itemDescription = itemDescription; self.publicLocationName = publicLocationName
+        self.privateLatitude = privateCoordinate?.latitude; self.privateLongitude = privateCoordinate?.longitude
+        self.publicLatitude = publicCoordinate?.latitude; self.publicLongitude = publicCoordinate?.longitude
+        self.campusPlaceID = campusPlaceID; self.occurredAt = occurredAt; self.createdAt = createdAt; self.updatedAt = createdAt
+        self.photoData = photoData; self.thumbnailData = thumbnailData; self.colorHint = colorHint; self.detectedText = detectedText
+        self.state = state.rawValue; self.isDemo = isDemo
+    }
+}
+
+// MARK: - Persisted lifecycle records
+
+enum MatchStatus: String, Codable, CaseIterable, Sendable { case potential, likely, strong, claimSubmitted, verified, rejected, resolved }
+
+struct MatchFactor: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID = UUID()
+    var icon: String
+    var text: String
+    var weight: Double
+}
+
+@Model
+final class MatchRecord {
+    @Attribute(.unique) var id: UUID
+    var lostReportID: UUID
+    var foundReportID: UUID
+    var score: Double
+    var createdAt: Date
+    var updatedAt: Date
+    var status: String
+    var factorsData: Data
+    var statusEnum: MatchStatus { MatchStatus(rawValue: status) ?? .potential }
+    var confidencePercent: Int { Int((score * 100).rounded()) }
+    var factors: [MatchFactor] { (try? JSONDecoder().decode([MatchFactor].self, from: factorsData)) ?? [] }
+
+    init(id: UUID = UUID(), lostReportID: UUID, foundReportID: UUID, score: Double,
+         status: MatchStatus, factors: [MatchFactor], createdAt: Date = .now) {
+        self.id = id; self.lostReportID = lostReportID; self.foundReportID = foundReportID; self.score = score
+        self.createdAt = createdAt; self.updatedAt = createdAt; self.status = status.rawValue
+        self.factorsData = (try? JSONEncoder().encode(factors)) ?? Data()
+    }
+}
+
+enum ClaimStatus: String, Codable, CaseIterable, Sendable { case pending, verified, rejected, needsReview, cancelled }
+
+@Model
+final class ClaimRequest {
+    @Attribute(.unique) var id: UUID
+    var reportID: UUID
+    var matchID: UUID?
+    var claimantID: String
+    var createdAt: Date
+    var reviewedAt: Date?
+    var status: String
+    var verificationScore: Double
+    var failedAttempts: Int
+    var statusEnum: ClaimStatus { ClaimStatus(rawValue: status) ?? .pending }
+    init(id: UUID = UUID(), reportID: UUID, matchID: UUID? = nil, claimantID: String,
+         status: ClaimStatus = .pending, verificationScore: Double = 0, createdAt: Date = .now) {
+        self.id = id; self.reportID = reportID; self.matchID = matchID; self.claimantID = claimantID
+        self.createdAt = createdAt; self.status = status.rawValue; self.verificationScore = verificationScore; self.failedAttempts = 0
+    }
+}
+
+enum ReturnArrangementStatus: String, Codable, CaseIterable, Sendable { case proposed, confirmed, cancelled, completed, noShow }
+
+@Model
+final class ReturnArrangement {
+    @Attribute(.unique) var id: UUID
+    var claimID: UUID
     var locationName: String
     var latitude: Double?
     var longitude: Double?
-    var date: Date
-    var dateReported: Date
-    var photoData: Data?
-    var privateDetails: String      // NOT shown publicly — for ownership verification
-    var status: String              // ItemStatus.rawValue
-    var colorHint: String           // e.g. "black", "blue"
-
-    // Computed helpers (not persisted)
-    var reportTypeEnum: ReportType {
-        ReportType(rawValue: reportType) ?? .lost
-    }
-
-    var categoryEnum: ItemCategory {
-        ItemCategory(rawValue: category) ?? .other
-    }
-
-    var statusEnum: ItemStatus {
-        ItemStatus(rawValue: status) ?? .active
-    }
-
-    var coordinate: CLLocationCoordinate2D? {
-        guard let lat = latitude, let lon = longitude else { return nil }
-        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
-    }
-
-    var approximateLocation: String {
-        locationName.isEmpty ? "Unknown location" : locationName
-    }
-
-    init(
-        id: UUID = UUID(),
-        reportType: ReportType,
-        name: String,
-        category: ItemCategory,
-        itemDescription: String,
-        locationName: String,
-        latitude: Double? = nil,
-        longitude: Double? = nil,
-        date: Date = Date(),
-        dateReported: Date = Date(),
-        photoData: Data? = nil,
-        privateDetails: String = "",
-        status: ItemStatus = .active,
-        colorHint: String = ""
-    ) {
-        self.id = id
-        self.reportType = reportType.rawValue
-        self.name = name
-        self.category = category.rawValue
-        self.itemDescription = itemDescription
-        self.locationName = locationName
-        self.latitude = latitude
-        self.longitude = longitude
-        self.date = date
-        self.dateReported = dateReported
-        self.photoData = photoData
-        self.privateDetails = privateDetails
-        self.status = status.rawValue
-        self.colorHint = colorHint
+    var scheduledAt: Date
+    var notes: String
+    var status: String
+    var createdAt: Date
+    var updatedAt: Date
+    var statusEnum: ReturnArrangementStatus { ReturnArrangementStatus(rawValue: status) ?? .proposed }
+    init(id: UUID = UUID(), claimID: UUID, locationName: String, coordinate: CLLocationCoordinate2D? = nil,
+         scheduledAt: Date, notes: String = "", status: ReturnArrangementStatus = .proposed, createdAt: Date = .now) {
+        self.id = id; self.claimID = claimID; self.locationName = locationName; self.latitude = coordinate?.latitude; self.longitude = coordinate?.longitude
+        self.scheduledAt = scheduledAt; self.notes = notes; self.status = status.rawValue; self.createdAt = createdAt; self.updatedAt = createdAt
     }
 }
 
-// MARK: - Match (In-Memory)
-
-struct ItemMatch: Identifiable {
-    let id: UUID
-    let lostReport: MockItemReport  // Using mock type for demo
-    let foundReport: MockItemReport
-    let confidence: Double          // 0.0 – 1.0
-    let reasons: [MatchReason]
-
-    var confidencePercent: Int { Int(confidence * 100) }
-
-    var confidenceTier: ConfidenceTier {
-        switch confidence {
-        case 0.75...: return .high
-        case 0.50..<0.75: return .medium
-        default: return .low
-        }
+@Model
+final class CoordinationMessage {
+    @Attribute(.unique) var id: UUID
+    var claimID: UUID
+    var senderID: String
+    var body: String
+    var createdAt: Date
+    init(id: UUID = UUID(), claimID: UUID, senderID: String, body: String, createdAt: Date = .now) {
+        self.id = id; self.claimID = claimID; self.senderID = senderID; self.body = body; self.createdAt = createdAt
     }
 }
 
-enum ConfidenceTier {
-    case high, medium, low
+enum ActivityEventType: String, Codable, CaseIterable, Sendable {
+    case potentialMatch, strongMatch, claimSubmitted, verificationRequired, claimVerified, claimRejected
+    case pickupScheduled, pickupReminder, returnCompleted, reportResolved
+}
 
-    var label: String {
-        switch self {
-        case .high: return "High Confidence"
-        case .medium: return "Possible Match"
-        case .low: return "Low Confidence"
-        }
+@Model
+final class ActivityEvent {
+    @Attribute(.unique) var id: UUID
+    var recipientID: String
+    var type: String
+    var title: String
+    var message: String
+    var createdAt: Date
+    var isRead: Bool
+    var relatedReportID: UUID?
+    var relatedClaimID: UUID?
+    var typeEnum: ActivityEventType { ActivityEventType(rawValue: type) ?? .potentialMatch }
+    init(id: UUID = UUID(), recipientID: String, type: ActivityEventType, title: String, message: String,
+         relatedReportID: UUID? = nil, relatedClaimID: UUID? = nil, createdAt: Date = .now) {
+        self.id = id; self.recipientID = recipientID; self.type = type.rawValue; self.title = title; self.message = message
+        self.createdAt = createdAt; self.isRead = false; self.relatedReportID = relatedReportID; self.relatedClaimID = relatedClaimID
     }
+}
+
+enum ModerationReason: String, Codable, CaseIterable, Sendable { case fakeReport, falseClaim, spam, harassment, suspiciousBehavior, incorrectInformation }
+enum ModerationStatus: String, Codable, CaseIterable, Sendable { case pending, reviewed, resolved, dismissed }
+
+@Model
+final class ModerationReport {
+    @Attribute(.unique) var id: UUID
+    var targetID: UUID
+    var reason: String
+    var details: String
+    var createdAt: Date
+    var status: String
+    init(id: UUID = UUID(), targetID: UUID, reason: ModerationReason, details: String = "", createdAt: Date = .now) {
+        self.id = id; self.targetID = targetID; self.reason = reason.rawValue; self.details = details; self.createdAt = createdAt; self.status = ModerationStatus.pending.rawValue
+    }
+}
+
+// MARK: - View adapters
+
+enum ConfidenceTier { case high, medium, low
+    var label: String { self == .high ? "High Confidence" : self == .medium ? "Possible Match" : "Low Confidence" }
 }
 
 struct MatchReason: Identifiable {
@@ -177,46 +256,17 @@ struct MatchReason: Identifiable {
     let text: String
 }
 
-// MARK: - OwnershipRequest (In-Memory)
-
-enum OwnershipRequestStatus {
-    case pending, accepted, rejected, verified
-}
-
-struct OwnershipRequest: Identifiable {
-    let id = UUID()
-    let matchID: UUID
-    var status: OwnershipRequestStatus
-    let challengeQuestion: String   // Derived from privateDetails
-    let dateSubmitted: Date
-}
-
-// MARK: - Mock Item (for demo / sample data layer)
-// This mirrors ItemReport but is a plain struct for easy mock usage.
-
-struct MockItemReport: Identifiable {
-    var id: UUID = UUID()
-    var reportType: ReportType
-    var name: String
-    var category: ItemCategory
-    var itemDescription: String
-    var locationName: String
-    var latitude: Double?
-    var longitude: Double?
-    var date: Date
-    var dateReported: Date = Date()
-    var imageName: String?          // SF Symbol or system image name for mocks
-    var photoData: Data? = nil
-    var privateDetails: String = ""
-    var status: ItemStatus = .active
-    var colorHint: String = ""
-
-    var coordinate: CLLocationCoordinate2D? {
-        guard let lat = latitude, let lon = longitude else { return nil }
-        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+/// A transient presentation wrapper around a persisted MatchRecord and its two reports.
+struct ItemMatch: Identifiable {
+    let id: UUID
+    let lostReport: ItemReport
+    let foundReport: ItemReport
+    let confidence: Double
+    let reasons: [MatchReason]
+    init(record: MatchRecord, lostReport: ItemReport, foundReport: ItemReport) {
+        id = record.id; self.lostReport = lostReport; self.foundReport = foundReport; confidence = record.score
+        reasons = record.factors.map { MatchReason(icon: $0.icon, text: $0.text) }
     }
-
-    var approximateLocation: String {
-        locationName.isEmpty ? "Unknown location" : locationName
-    }
+    var confidencePercent: Int { Int((confidence * 100).rounded()) }
+    var confidenceTier: ConfidenceTier { confidence >= 0.75 ? .high : confidence >= 0.50 ? .medium : .low }
 }

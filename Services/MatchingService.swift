@@ -1,182 +1,83 @@
 import Foundation
 import CoreLocation
 
-// MARK: - MatchingService Protocol
-// Clean abstraction — swap in an AI backend later without touching UI.
+struct MatchingConfiguration: Sendable {
+    let categoryWeight = 0.25
+    let nameWeight = 0.20
+    let descriptionWeight = 0.20
+    let locationWeight = 0.15
+    let colorWeight = 0.10
+    let timeWeight = 0.10
+    let minimumScore = 0.35
+    let fullLocationDistance: CLLocationDistance = 100
+    let maximumLocationDistance: CLLocationDistance = 2_000
+    let maximumTimeDifference: TimeInterval = 7 * 24 * 60 * 60
+}
+
+struct ScoredMatch: Identifiable, Sendable {
+    var id: UUID { UUID() }
+    let lostReportID: UUID
+    let foundReportID: UUID
+    let score: Double
+    let status: MatchStatus
+    let factors: [MatchFactor]
+}
 
 protocol MatchingServiceProtocol {
-    func findMatches(for lostItem: MockItemReport, in foundItems: [MockItemReport]) -> [ItemMatch]
-    func topMatches(in allItems: [MockItemReport]) -> [ItemMatch]
+    func score(lost: ItemReport, found: ItemReport) -> ScoredMatch?
 }
-
-// MARK: - Local Scoring Implementation
 
 final class MatchingService: MatchingServiceProtocol {
+    private let configuration: MatchingConfiguration
+    init(configuration: MatchingConfiguration = .init()) { self.configuration = configuration }
 
-    // MARK: Scoring Weights
-    private let categoryWeight: Double = 30
-    private let keywordWeight: Double = 30
-    private let colorWeight: Double = 20
-    private let locationWeight: Double = 10
-    private let timeWeight: Double = 10
-
-    /// Minimum confidence to surface a match (0.0–1.0)
-    private let minimumConfidence: Double = 0.35
-
-    /// Max distance (meters) to score full location points
-    private let maxScoredDistance: Double = 2000
-
-    /// Max time difference (seconds) to score full time points
-    private let maxScoredTimeDiff: Double = 7 * 24 * 3600 // 7 days
-
-    // MARK: - Public API
-
-    func findMatches(for lostItem: MockItemReport, in foundItems: [MockItemReport]) -> [ItemMatch] {
-        foundItems
-            .compactMap { score(lost: lostItem, found: $0) }
-            .filter { $0.confidence >= minimumConfidence }
-            .sorted { $0.confidence > $1.confidence }
-    }
-
-    func topMatches(in allItems: [MockItemReport]) -> [ItemMatch] {
-        let lost = allItems.filter { $0.reportType == .lost }
-        let found = allItems.filter { $0.reportType == .found }
-
-        var matches: [ItemMatch] = []
-        for lostItem in lost {
-            let itemMatches = findMatches(for: lostItem, in: found)
-            matches.append(contentsOf: itemMatches.prefix(3))
+    func score(lost: ItemReport, found: ItemReport) -> ScoredMatch? {
+        guard lost.reportTypeEnum == .lost, found.reportTypeEnum == .found, lost.isActive, found.isActive else { return nil }
+        var score = 0.0
+        var factors = [MatchFactor]()
+        if lost.categoryEnum == found.categoryEnum {
+            score += configuration.categoryWeight
+            factors.append(.init(icon: "checkmark.circle.fill", text: "Same category: \(lost.categoryEnum.rawValue)", weight: configuration.categoryWeight))
         }
-        return matches.sorted { $0.confidence > $1.confidence }
-    }
-
-    // MARK: - Private Scoring
-
-    private func score(lost: MockItemReport, found: MockItemReport) -> ItemMatch? {
-        var totalScore: Double = 0
-        var reasons: [MatchReason] = []
-
-        // 1. Category Match (0–30 pts)
-        let categoryScore = scoreCategory(lost: lost, found: found)
-        totalScore += categoryScore
-        if categoryScore >= categoryWeight {
-            reasons.append(MatchReason(icon: "checkmark.circle.fill", text: "Same category: \(lost.category.rawValue)"))
-        } else if categoryScore >= categoryWeight * 0.5 {
-            reasons.append(MatchReason(icon: "circle", text: "Similar category"))
+        let nameSimilarity = similarity(lost.name, found.name)
+        if nameSimilarity > 0 {
+            score += nameSimilarity * configuration.nameWeight
+            if nameSimilarity >= 0.20 { factors.append(.init(icon: "checkmark.circle.fill", text: "Similar item name", weight: nameSimilarity * configuration.nameWeight)) }
         }
-
-        // 2. Keyword Overlap (0–30 pts)
-        let (keyScore, keyReason) = scoreKeywords(lost: lost, found: found)
-        totalScore += keyScore
-        if let reason = keyReason { reasons.append(reason) }
-
-        // 3. Color Match (0–20 pts)
-        let (colorScore, colorReason) = scoreColor(lost: lost, found: found)
-        totalScore += colorScore
-        if let reason = colorReason { reasons.append(reason) }
-
-        // 4. Location Proximity (0–10 pts)
-        let (locationScore, locationReason) = scoreLocation(lost: lost, found: found)
-        totalScore += locationScore
-        if let reason = locationReason { reasons.append(reason) }
-
-        // 5. Time Proximity (0–10 pts)
-        let (timeScore, timeReason) = scoreTime(lost: lost, found: found)
-        totalScore += timeScore
-        if let reason = timeReason { reasons.append(reason) }
-
-        let maxScore = categoryWeight + keywordWeight + colorWeight + locationWeight + timeWeight
-        let confidence = totalScore / maxScore
-
-        guard confidence >= minimumConfidence else { return nil }
-
-        return ItemMatch(
-            id: UUID(),
-            lostReport: lost,
-            foundReport: found,
-            confidence: min(confidence, 0.99),
-            reasons: reasons
-        )
-    }
-
-    private func scoreCategory(lost: MockItemReport, found: MockItemReport) -> Double {
-        lost.category == found.category ? categoryWeight : 0
-    }
-
-    private func scoreKeywords(lost: MockItemReport, found: MockItemReport) -> (Double, MatchReason?) {
-        let lostKeywords = (lost.name + " " + lost.itemDescription).keywords()
-        let foundKeywords = (found.name + " " + found.itemDescription).keywords()
-
-        guard !lostKeywords.isEmpty, !foundKeywords.isEmpty else { return (0, nil) }
-
-        let intersection = lostKeywords.intersection(foundKeywords)
-        let union = lostKeywords.union(foundKeywords)
-        let jaccard = Double(intersection.count) / Double(union.count)
-        let score = jaccard * keywordWeight
-
-        var reason: MatchReason? = nil
-        if jaccard > 0.25 {
-            let sharedWords = intersection.prefix(3).joined(separator: ", ")
-            reason = MatchReason(icon: "checkmark.circle.fill", text: "Similar description: \"\(sharedWords)\"")
-        } else if jaccard > 0.1 {
-            reason = MatchReason(icon: "circle", text: "Some overlapping description")
+        let descriptionSimilarity = similarity(lost.itemDescription, found.itemDescription)
+        if descriptionSimilarity > 0 {
+            score += descriptionSimilarity * configuration.descriptionWeight
+            if descriptionSimilarity >= 0.12 { factors.append(.init(icon: "checkmark.circle.fill", text: "Similar description", weight: descriptionSimilarity * configuration.descriptionWeight)) }
         }
-        return (score, reason)
-    }
-
-    private func scoreColor(lost: MockItemReport, found: MockItemReport) -> (Double, MatchReason?) {
-        let lostColor = colorKeyword(from: lost)
-        let foundColor = colorKeyword(from: found)
-
-        guard let lc = lostColor, let fc = foundColor else { return (0, nil) }
-        if lc == fc {
-            return (colorWeight, MatchReason(icon: "checkmark.circle.fill", text: "Same color: \(lc.capitalized)"))
+        let lostColor = lost.colorHint.isEmpty ? (lost.name + " " + lost.itemDescription).normalizedColorKeyword : lost.colorHint.lowercased()
+        let foundColor = found.colorHint.isEmpty ? (found.name + " " + found.itemDescription).normalizedColorKeyword : found.colorHint.lowercased()
+        if let lostColor, let foundColor, lostColor == foundColor {
+            score += configuration.colorWeight
+            factors.append(.init(icon: "checkmark.circle.fill", text: "Same color: \(lostColor.capitalized)", weight: configuration.colorWeight))
         }
-        return (0, nil)
-    }
-
-    private func colorKeyword(from item: MockItemReport) -> String? {
-        if !item.colorHint.isEmpty { return item.colorHint }
-        return (item.name + " " + item.itemDescription).normalizedColorKeyword
-    }
-
-    private func scoreLocation(lost: MockItemReport, found: MockItemReport) -> (Double, MatchReason?) {
-        guard let lc = lost.coordinate, let fc = found.coordinate else {
-            // Fuzzy: compare location name words
-            let sharedWords = lost.locationName.keywords().intersection(found.locationName.keywords())
-            if !sharedWords.isEmpty {
-                return (locationWeight * 0.7, MatchReason(icon: "checkmark.circle.fill", text: "Same general area: \(lost.locationName)"))
+        if let lostCoordinate = lost.coordinate, let foundCoordinate = found.coordinate {
+            let distance = lostCoordinate.distance(to: foundCoordinate)
+            let locationScore = max(0, 1 - (distance - configuration.fullLocationDistance) / (configuration.maximumLocationDistance - configuration.fullLocationDistance))
+            if distance <= configuration.maximumLocationDistance {
+                score += locationScore * configuration.locationWeight
+                factors.append(.init(icon: distance <= configuration.fullLocationDistance ? "checkmark.circle.fill" : "location.circle", text: "Reported \(distance.metersToKmString) apart", weight: locationScore * configuration.locationWeight))
             }
-            return (0, nil)
         }
-        let distance = lc.distance(to: fc)
-        if distance < 100 {
-            return (locationWeight, MatchReason(icon: "checkmark.circle.fill", text: "Reported within \(Int(distance))m of each other"))
-        } else if distance < maxScoredDistance {
-            let score = (1 - distance / maxScoredDistance) * locationWeight
-            return (score, MatchReason(icon: "circle", text: "Reported within \(Int(distance).metersToKmString)"))
+        let difference = abs(lost.occurredAt.timeIntervalSince(found.occurredAt))
+        if difference <= configuration.maximumTimeDifference {
+            let timeScore = 1 - difference / configuration.maximumTimeDifference
+            score += timeScore * configuration.timeWeight
+            let hours = max(1, Int(difference / 3600))
+            factors.append(.init(icon: "clock", text: "Reported within \(hours) hour\(hours == 1 ? "" : "s")", weight: timeScore * configuration.timeWeight))
         }
-        return (0, nil)
+        guard score >= configuration.minimumScore else { return nil }
+        let status: MatchStatus = score >= 0.75 ? .strong : score >= 0.55 ? .likely : .potential
+        return ScoredMatch(lostReportID: lost.id, foundReportID: found.id, score: min(score, 0.99), status: status, factors: factors)
     }
 
-    private func scoreTime(lost: MockItemReport, found: MockItemReport) -> (Double, MatchReason?) {
-        let timeDiff = abs(lost.date.timeIntervalSince(found.date))
-        if timeDiff < 3600 {
-            return (timeWeight, MatchReason(icon: "checkmark.circle.fill", text: "Reported within \(Int(timeDiff / 60)) minutes"))
-        } else if timeDiff < maxScoredTimeDiff {
-            let score = (1 - timeDiff / maxScoredTimeDiff) * timeWeight
-            let hours = Int(timeDiff / 3600)
-            let days = hours / 24
-            let label = days > 0 ? "\(days) day\(days == 1 ? "" : "s")" : "\(hours) hour\(hours == 1 ? "" : "s")"
-            return (score, MatchReason(icon: "circle", text: "Reported within \(label)"))
-        }
-        return (0, nil)
-    }
-}
-
-extension Int {
-    var metersToKmString: String {
-        if self < 1000 { return "\(self)m" }
-        return String(format: "%.1fkm", Double(self) / 1000)
+    private func similarity(_ lhs: String, _ rhs: String) -> Double {
+        let lhsWords = lhs.keywords(); let rhsWords = rhs.keywords()
+        guard !lhsWords.isEmpty, !rhsWords.isEmpty else { return 0 }
+        return Double(lhsWords.intersection(rhsWords).count) / Double(lhsWords.union(rhsWords).count)
     }
 }

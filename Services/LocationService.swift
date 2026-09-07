@@ -24,6 +24,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     // MARK: Private
     private let manager = CLLocationManager()
     private let geocoder = CLGeocoder()
+    private var locationWaiters: [CheckedContinuation<CLLocation?, Never>] = []
 
     // MARK: Init
     override init() {
@@ -58,6 +59,18 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         manager.requestLocation()
     }
 
+    /// A one-shot async API for reporting and nearby discovery.
+    func currentLocationOnce() async -> CLLocation? {
+        guard hasPermission else {
+            requestPermission()
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            locationWaiters.append(continuation)
+            fetchCurrentLocation()
+        }
+    }
+
     /// Reverse geocode coordinates to a human-readable name
     func reverseGeocode(coordinate: CLLocationCoordinate2D) async -> String? {
         let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
@@ -85,6 +98,9 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         currentLocation = locations.last
 
         if let loc = currentLocation {
+            let waiters = locationWaiters
+            locationWaiters.removeAll()
+            waiters.forEach { $0.resume(returning: loc) }
             Task {
                 let placemarks = try? await geocoder.reverseGeocodeLocation(loc)
                 currentPlacemark = placemarks?.first
@@ -95,5 +111,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         isLocating = false
         locationErrorMessage = "Couldn't get your location. Please enter it manually."
+        let waiters = locationWaiters
+        locationWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: nil) }
     }
 }
